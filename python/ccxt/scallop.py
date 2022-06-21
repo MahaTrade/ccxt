@@ -9,6 +9,8 @@ from datetime import date
 import datetime
 from multiprocessing.managers import SyncManager
 from os import symlink
+from sqlite3 import Time
+from tkinter.messagebox import NO
 
 from ccxt.base.exchange import Exchange
 from ccxt.base.errors import ExchangeError
@@ -237,7 +239,7 @@ class scallop(Exchange):
             },
             'options': {
                 'defaultType': 'spot',
-                'types': ['spot', 'margin','future'],
+                'types': ['spot', 'margin', 'future'],
                 'accountsByType': {
                     'spot': '1',
                     'margin': '2',
@@ -340,8 +342,8 @@ class scallop(Exchange):
         return getattr(self, method)(params)
 
     def fetch_markets_v2(self, params={}):
-        defaultType = self.safe_string_2 (self.options, 'fetchMarkets', 'defaultType', 'spot');
-        type = self.safe_string (params, 'type', defaultType);
+        defaultType = self.safe_string_2(self.options, 'fetchMarkets', 'defaultType', 'spot')
+        type = self.safe_string(params, 'type', defaultType)
         query = self.omit(params, 'type')
         if (type != 'spot') and (type != 'future') and (type != 'margin'):
             raise ExchangeError(self.id + " does not support '" + type + "' type, set exchange.options['defaultType'] to 'spot', 'margin', 'delivery' or 'future'")  # eslint-disable-line quotes
@@ -369,7 +371,7 @@ class scallop(Exchange):
         #         "code":0
         #     }
         #
-        markets=[]
+        markets = []
         if type == 'future':
             markets = response
         else:
@@ -377,21 +379,17 @@ class scallop(Exchange):
         result = []
         for i in range(0, len(markets)):
             market = markets[i]
-            # baseId=''
-            # quoteId=''
-            if self.safe_string(market, 'baseAsset') is None:
-                asset= market.get('symbol').split('-')
-                baseId = asset[1]
-                quoteId = asset[2]
-            else:
-                baseId = self.safe_string(market, 'baseAsset',None)
-                quoteId = self.safe_string(market, 'quoteAsset',None)
             id = self.safe_string(market, 'symbol')
+            baseId = self.safe_string(market, 'baseAsset', None)
+            quoteId = self.safe_string(market, 'quoteAsset', None)
             base = self.safe_currency_code(baseId)
             quote = self.safe_currency_code(quoteId)
-            symbol=base + '/' + quote
-            if baseId is None or quote is None:
-                symbol=id
+            if base is None or quote is None:
+                symbol = id
+            else:
+                symbol = base + '/' + quote
+            # if base is None or quote is None:
+            #     symbol=id
             #
             # The status is documented in the exchange API docs as follows:
             # TRADING, HALT(delisted), BREAK(trading paused)
@@ -404,7 +402,7 @@ class scallop(Exchange):
             #
             result.append({
                 'id': id,
-                'symbol':symbol,
+                'symbol': symbol,
                 'base': base,
                 'quote': quote,
                 'settle': None,
@@ -427,8 +425,8 @@ class scallop(Exchange):
                 'strike': None,
                 'optionType': None,
                 'precision': {
-                    'amount': self.safe_integer(market, 'quantityPrecision'),
-                    'price': self.safe_integer(market, 'pricePrecision'),
+                    'amount': self.safe_integer(market, 'quantityPrecision', None),
+                    'price': self.safe_integer(market, 'pricePrecision', None),
                 },
                 'limits': {
                     'leverage': {
@@ -527,22 +525,40 @@ class scallop(Exchange):
             })
         return result
 
-    def parse_balance(self, response):
-        balances = self.safe_value(response, 'list', [])
-        result = {'info': response}
-        for i in range(0, len(balances)):
-            balance = balances[i]
-            currencyId = self.safe_string(balance, 'currency')
-            code = self.safe_currency_code(currencyId)
-            account = self.account()
-            account['used'] = self.safe_string(balance, 'frozen')
-            account['free'] = self.safe_string(balance, 'free')
-            account['total'] = self.safe_string(balance, 'total')
-            result[code] = account
+    def parse_balance(self, response, type):
+        result = {}
+        if type == 'future':
+            balances = self.safe_value(response, 'account', [])
+            for i in range(0, len(balances)):
+                balance = balances[i]
+                currencyId = self.safe_string(balance, 'marginCoin')
+                code = self.safe_currency_code(currencyId)
+                account = self.account()
+                account['used'] = (self.safe_number(balance, 'accountLock'))
+                account['free'] = (self.safe_number(balance, 'accountNormal'))
+                account['total'] = (account['used']) + (account['free'])
+                result[code] = account
+        else:
+            balances = self.safe_value(response, 'balances', [])
+            for i in range(0, len(balances)):
+                balance = balances[i]
+                currencyId = self.safe_string(balance, 'asset')
+                code = self.safe_currency_code(currencyId)
+                account = self.account()
+                account['used'] = self.safe_string(balance, 'locked')
+                account['free'] = self.safe_string(balance, 'free')
+                account['total'] = self.safe_string(balance, 'total')
+                result[code] = account
         return self.safe_balance(result)
 
     def fetch_balance(self, params={}):
-        response = self.privateGetAccount()
+        defaultType = self.safe_string(self.options, 'defaultType', 'spot')
+        marketType = self.safe_string(params, 'type', defaultType)
+        self.options['defaultType'] = marketType
+        method = "privateGetAccount"
+        if marketType == 'future':
+            method = 'futuresPrivateGetAccount'
+        response = getattr(self, method)()
         #
         #     {
         #         "code": 0,
@@ -554,7 +570,7 @@ class scallop(Exchange):
         #             }
         #         ]
         #     }
-        return self.parse_balance(response)
+        return self.parse_balance(response, marketType)
 
     def fetch_order_book(self, symbol, limit=None, params={}):
         self.load_markets()
@@ -871,51 +887,50 @@ class scallop(Exchange):
     def create_order(self, symbol, type, side, amount, price=None, params={}):
         defaultType = self.safe_string(self.options, 'defaultType', 'spot')
         marketType = self.safe_string(params, 'type', defaultType)
-        self.options['defaultType']=marketType
+        self.options['defaultType'] = marketType
         params = self.omit(params, 'type')
         self.load_markets()
         market = self.market(symbol)
-        timestamp = str(self.nonce())
+        timestamp = str(self.nonce() * 1000)
         request = {}
         method = 'privatePostOrder'
-        if marketType == 'future' :
-            open = self.safe_string (params, 'open');
-            timeInForces = self.safe_string (params, 'timeInForces');
-            positionType = self.safe_number (params, 'positionType');
+        if marketType == 'future':
+            open = self.safe_string(params, 'open')
+            timeInForces = self.safe_string(params, 'timeInForces')
+            positionType = self.safe_number(params, 'positionType')
             request = {
                 'contractName': market['id'],
-                'volume':  int(self.amount_to_precision (symbol, amount)),
+                'volume': 10,
                 'side': side.upper(),
                 'open': open,
                 'timeInForce': timeInForces,
-            };
+            }
             if type == 'MARKET':
-                request['type'] = type
+                request['type'] = type.upper()
             else:
                 request['price'] = int(self.price_to_precision(symbol, price))
-                request['type'] = type
-            request['clientOrderId'] = timestamp;
-            request['positionType'] = positionType;
-            method = 'futuresPrivatePostOrder';
+                request['type'] = type.upper()
+            request['clientOrderId'] = timestamp
+            request['positionType'] = int(positionType)
+            method = 'futuresPrivatePostOrder'
         else:
-            newClientOrderId = self.safe_string (params, 'newClientOrderId', timestamp);
-            recvWindow = self.safe_string (params, 'recvWindow', None);
-            print(self.amount_to_precision (symbol, amount))
+            newClientOrderId = self.safe_string(params, 'newClientOrderId', timestamp)
+            recvWindow = self.safe_string(params, 'recvWindow', None)
             request = {
                 'symbol': market['id'],
-                'volume': int (self.amount_to_precision (symbol, amount)),
+                'volume': int(self.amount_to_precision(symbol, amount)),
                 'side': side.upper(),
-            };
-            if type == 'MARKET' :
-                request['type'] = type;
-            else :
-                request['type'] = type;
-                request['price'] = int (self.price_to_precision (symbol, price));
+            }
+            if type == 'MARKET':
+                request['type'] = type.upper()
+            else:
+                request['type'] = type.upper()
+                request['price'] = int(self.price_to_precision(symbol, price))
             request['newClientOrderId'] = newClientOrderId
             request['recvWindow'] = recvWindow
-        print(request)
-        response = getattr(self,method)(self.extend(request, params))
-        print('response',response)
+        response = getattr(self, method)(self.extend(request, params))
+        # if response['code'] is not None and (response['code'] == '-1147' or response['code'] == '-2017'):
+        #     raise InsufficientFunds('Insufficient balance')
         #
         #     {
         #         "code": 0,
@@ -931,16 +946,28 @@ class scallop(Exchange):
             'price': price,
         })
 
-    def cancel_order(self, id, symbol=None, newClientOrderId=None, params={}):
+    def cancel_order(self, id, symbol=None, params={}):
+        defaultType = self.safe_string(self.options, 'defaultType', 'spot')
+        marketType = self.safe_string(params, 'type', defaultType)
+        self.options['defaultType'] = marketType
         self.load_markets()
         market = self.market(symbol)
         params = self.omit(params, 'type')
-        request = {
-            'symbol': market['id'].upper(),
-            'orderId': id,
-            'newClientOrderId': newClientOrderId
-        }
-        response = self.privatePostCancel(self.extend(request, params))
+        method = 'privatePostCancel'
+        if marketType == 'future':
+            request = {
+                'contractName': market['id'],
+                'orderId': id,
+            }
+            method = 'futuresPrivatePostCancel'
+        else:
+            newClientOrderId = self.safe_string(params, 'newClientOrderId', None)
+            request = {
+                'symbol': market['id'].upper(),
+                'orderId': id,
+                'newClientOrderId': newClientOrderId
+            }
+        response = getattr(self, method)(self.extend(request, params))
         #
         #     {
         #         "code": 0,
@@ -1021,14 +1048,14 @@ class scallop(Exchange):
         # }
         #
         id = self.safe_string(order, 'orderId')
-        timestamp = 0
         if order.get('transactTime'):
-            timestamp = self.safe_timestamp(order, 'transactTime')
+            timestamp = self.safe_timestamp(order, 'transactTime', None)
         else:
-            timestamp = self.safe_timestamp(order, 'time')
-
-        side = self.safe_string(order, 'side')
-        type = self.safe_string(order, 'type')
+            timestamp = self.safe_timestamp(order, 'time', None)
+        if timestamp is not None:
+            timestamp = timestamp / 1000
+        side = self.safe_string(order, 'side', None)
+        type = self.safe_string(order, 'type', None)
         # if side is not None:
         #     parts = side.split('_')
         #     numParts = len(parts)
@@ -1049,7 +1076,7 @@ class scallop(Exchange):
             'id': id,
             'clientOrderId': None,
             'timestamp': timestamp,
-            'datetime': self.iso8601(timestamp / 1000),
+            'datetime': self.iso8601(timestamp),
             'lastTradeTimestamp': None,
             'symbol': symbol,
             'type': type,
@@ -1071,23 +1098,23 @@ class scallop(Exchange):
     def fetch_open_orders(self, symbol=None, params={}):
         defaultType = self.safe_string(self.options, 'defaultType', 'spot')
         orderType = self.safe_string(params, 'type', defaultType)
-        since = self.safe_number (params, 'since', None);
-        limit = self.safe_integer (params, 'limit', None);
+        since = self.safe_number(params, 'since', None)
+        limit = self.safe_integer(params, 'limit', None)
         self.options['defaultType'] = orderType
         params = self.omit(params, 'type')
         self.load_markets()
         market = None
         request = {}
-        method = 'privateGetOpenOrders';
+        method = 'privateGetOpenOrders'
         if symbol is not None:
             market = self.market(symbol)
             request['symbol'] = market['id']
         if orderType == 'future':
-            request['contractName'] = market['id'];
-            method = 'futuresPrivateGetOpenOrders';
+            request['contractName'] = market['id']
+            method = 'futuresPrivateGetOpenOrders'
         if limit is not None:
             request['limit'] = limit
-        response = getattr(self,method)(self.extend(request, params))
+        response = getattr(self, method)(self.extend(request, params))
         #
         #     {
         #   list: [
@@ -1105,12 +1132,12 @@ class scallop(Exchange):
         #   ]
         # }
         #
-        data=[]
-        if 'code' in response and response['code']==0:
+        data = []
+        if 'code' in response and response['code'] == 0:
             return self.parse_orders(data, market, since, limit)
         else:
-            if orderType=='future':
-                data=response
+            if orderType == 'future':
+                data = response
             else:
                 data = self.safe_value(response, 'list', [])
         return self.parse_orders(data, market, since, limit)
@@ -1187,18 +1214,18 @@ class scallop(Exchange):
         self.options['defaultType'] = orderType
         params = self.omit(params, 'type')
         self.load_markets()
-        market = self.market (symbol)
+        market = self.market(symbol)
         request = {}
-        method = 'privateGetMyTrades';
-        if orderType == 'future' :
-            request['contractName'] = market['id'];
-            method = 'futuresPrivateGetMyTrades';
-        else :
+        method = 'privateGetMyTrades'
+        if orderType == 'future':
+            request['contractName'] = market['id']
+            method = 'futuresPrivateGetMyTrades'
+        else:
             request['symbol'] = market['id']
         if limit is not None:
             request['limit'] = limit  # default 10, max 100
         request['fromId'] = fromId
-        response = getattr(self,method)(self.extend(request, params))
+        response = getattr(self, method)(self.extend(request, params))
         #
         #      {
         #          "list":[
@@ -1553,29 +1580,28 @@ class scallop(Exchange):
             # the signature is not time-limited :\
             signatureBody = ''
             midPath = ''
-            if api == 'futuresPrivate': 
+            if api == 'futuresPrivate':
                 midPath = '/fapi'
-            else : 
+            else:
                 midPath = '/sapi'
             # headers = headers if (headers is not None) else {}
             if method == 'GET':
                 if urlencoded:
                     url += '?' + urlencoded
-                    signatureBody = timestamp + method + "{midPath}/v1/{path}?{urlencoded}".format(midPath=midPath,path=path, urlencoded=urlencoded)
+                    signatureBody = timestamp + method + "{midPath}/v1/{path}?{urlencoded}".format(midPath=midPath, path=path, urlencoded=urlencoded)
                 else:
-                    signatureBody = timestamp + method + "{midPath}/v1/{path}".format(midPath=midPath,path=path)
+                    signatureBody = timestamp + method + "{midPath}/v1/{path}".format(midPath=midPath, path=path)
 
             elif method == 'POST':
                 body = self.json(query)
-                signatureBody = timestamp + method + "{midPath}/v1/{path}{body}".format(midPath=midPath,path=path, body=body)
+                signatureBody = timestamp + method + "{midPath}/v1/{path}{body}".format(midPath=midPath, path=path, body=body)
             signature = self.hmac(self.encode(signatureBody), self.encode(self.secret), 'SHA256')
             headers = {
                 'X-CH-APIKEY': self.apiKey,
                 'X-CH-SIGN': signature,
                 'X-CH-TS': timestamp,
-                'Content-Type':'application/json'
+                'Content-Type': 'application/json'
             }
-            print(headers)
         else:
             if urlencoded:
                 url += '?' + urlencoded
@@ -1586,7 +1612,7 @@ class scallop(Exchange):
         if not response:
             return  # fall back to default error handler
         if statusCode == 200 and ('code' in response) == False:
-            return;
+            return
         # code = str(statusCode)
         # if (code == '0') or (code == '200'):
         #     return  # no error
@@ -1596,4 +1622,3 @@ class scallop(Exchange):
         unknownError = [ExchangeError, feedback]
         ExceptionClass, message = self.safe_value(self.exceptions['exact'], statusCode, unknownError)
         raise ExceptionClass(message)
-
